@@ -49,7 +49,7 @@ class Context(object):
 context = Context()
 
 
-async def run_client(hostname: str, exec_cmd: str, *, port=22,
+async def run_client(hostname: str, username, exec_cmd: str, *, port=22,
                      poll_delay=None, timeout=30.0,
                      name_length=None, verbose=False):
     '''An async handler to collect gpustat through a SSH channel.'''
@@ -59,7 +59,7 @@ async def run_client(hostname: str, exec_cmd: str, *, port=22,
 
     async def _loop_body():
         # establish a SSH connection.
-        async with asyncssh.connect(hostname, port=port) as conn:
+        async with asyncssh.connect(hostname, username=username, port=port) as conn:
             cprint(f"[{hostname:<{L}}] SSH connection established!", attrs=['bold'])
 
             while True:
@@ -112,7 +112,7 @@ async def run_client(hostname: str, exec_cmd: str, *, port=22,
         await asyncio.sleep(poll_delay)
 
 
-async def spawn_clients(hosts: List[str], exec_cmds: List[str], *,
+async def spawn_clients(hosts: List[str], exec_cmds: List[str], usernames: List[str],*,
                         default_port: int, verbose=False):
     '''Create a set of async handlers, one per host.'''
 
@@ -134,9 +134,9 @@ async def spawn_clients(hosts: List[str], exec_cmds: List[str], *,
 
         # launch all clients parallel
         await asyncio.gather(*[
-            run_client(hostname, exec_cmd, port=port or default_port,
+            run_client(hostname, username, exec_cmd, port=port or default_port,
                        verbose=verbose, name_length=name_length)
-            for (hostname, exec_cmd, port) in zip(host_names, exec_cmds, host_ports)
+            for (hostname, username, exec_cmd, port) in zip(host_names, usernames, exec_cmds, host_ports)
         ])
     except Exception as ex:
         # TODO: throw the exception outside and let aiohttp abort startup
@@ -211,6 +211,7 @@ async def websocket_handler(request):
 
 def create_app(*,
                hosts=['localhost'],
+               usernames=['john'],
                default_port: int = 22,
                ssl_certfile: Optional[str] = None,
                ssl_keyfile: Optional[str] = None,
@@ -225,7 +226,7 @@ def create_app(*,
 
     async def start_background_tasks(app):
         clients = spawn_clients(
-            hosts, exec_cmds, default_port=default_port, verbose=verbose)
+            hosts, exec_cmds, usernames, default_port=default_port, verbose=verbose)
         # See #19 for why we need to this against aiohttp 3.5, 3.8, and 4.0
         loop = app.loop if hasattr(app, 'loop') else asyncio.get_event_loop()
         app['tasks'] = loop.create_task(clients)
@@ -280,17 +281,20 @@ def main():
 
     hosts = list([])
     execs = list([])
-    for host, _exec in config:
+    usernames = list([])
+    for host, _exec, name in config:
         cprint(f"Hosts : {host}", color='green')
         cprint(f"Cmd   : {_exec}", color='yellow')
+        cprint(f"User: {name}", color='blue')
         hosts.append(host)
         execs.append(_exec)
+        usernames.append(name)
 
     if args.interval > 0.1:
         context.interval = args.interval
 
     app, ssl_context = create_app(
-        hosts=hosts, default_port=args.ssh_port,
+        hosts=hosts, usernames=usernames, default_port=args.ssh_port,
         ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile,
         exec_cmds=execs,
         verbose=args.verbose)

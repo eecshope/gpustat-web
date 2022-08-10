@@ -27,7 +27,7 @@ python -m gpustat_web --port 48109 --config CONFIG_PATH
 
 Please use `python=3.6` only. 
 
-The config file is JSON list. Each element in the JSON list is a small list of two element: [ADDRESS:PORT, GPUSTAT PATH]. Considering that
+The config file is JSON list. Each element in the JSON list is a small list of two element: [ADDRESS:PORT, GPUSTAT PATH, USER_NAME]. Considering that
 most of the users install `gpustat` with virtual environment, it is more convenient to specify `gpustat` path manually. 
 
 [gpustat]: https://github.com/wookayin/gpustat/
