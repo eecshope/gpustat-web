@@ -12,6 +12,7 @@ import os
 import sys
 import traceback
 import urllib
+import json
 import ssl
 
 import asyncio
@@ -25,7 +26,6 @@ from termcolor import cprint, colored
 from aiohttp import web
 import aiohttp_jinja2 as aiojinja2
 
-
 __PATH__ = os.path.abspath(os.path.dirname(__file__))
 
 DEFAULT_GPUSTAT_COMMAND = "gpustat --color --gpuname-width 25"
@@ -37,6 +37,7 @@ DEFAULT_GPUSTAT_COMMAND = "gpustat --color --gpuname-width 25"
 
 class Context(object):
     '''The global context object.'''
+
     def __init__(self):
         self.host_status = OrderedDict()
         self.interval = 5.0
@@ -62,7 +63,7 @@ async def run_client(hostname: str, exec_cmd: str, *, port=22,
             cprint(f"[{hostname:<{L}}] SSH connection established!", attrs=['bold'])
 
             while True:
-                if False: #verbose: XXX DEBUG
+                if False:  # verbose: XXX DEBUG
                     print(f"[{hostname:<{L}}] querying... ")
 
                 result = await asyncio.wait_for(conn.run(exec_cmd), timeout=timeout)
@@ -72,7 +73,8 @@ async def run_client(hostname: str, exec_cmd: str, *, port=22,
                     cprint(f"[{now} [{hostname:<{L}}] Error, exitcode={result.exit_status}", color='red')
                     cprint(result.stderr or '', color='red')
                     stderr_summary = (result.stderr or '').split('\n')[0]
-                    context.host_set_message(hostname, colored(f'[exitcode {result.exit_status}] {stderr_summary}', 'red'))
+                    context.host_set_message(hostname,
+                                             colored(f'[exitcode {result.exit_status}] {stderr_summary}', 'red'))
                 else:
                     if verbose:
                         cprint(f"[{now} [{hostname:<{L}}] OK from gpustat ({len(result.stdout)} bytes)", color='cyan')
@@ -110,7 +112,7 @@ async def run_client(hostname: str, exec_cmd: str, *, port=22,
         await asyncio.sleep(poll_delay)
 
 
-async def spawn_clients(hosts: List[str], exec_cmd: str, *,
+async def spawn_clients(hosts: List[str], exec_cmds: List[str], *,
                         default_port: int, verbose=False):
     '''Create a set of async handlers, one per host.'''
 
@@ -133,8 +135,8 @@ async def spawn_clients(hosts: List[str], exec_cmd: str, *,
         # launch all clients parallel
         await asyncio.gather(*[
             run_client(hostname, exec_cmd, port=port or default_port,
-                    verbose=verbose, name_length=name_length)
-            for (hostname, port) in zip(host_names, host_ports)
+                       verbose=verbose, name_length=name_length)
+            for (hostname, exec_cmd, port) in zip(host_names, exec_cmds, host_ports)
         ])
     except Exception as ex:
         # TODO: throw the exception outside and let aiohttp abort startup
@@ -148,6 +150,7 @@ async def spawn_clients(hosts: List[str], exec_cmd: str, *,
 
 # monkey-patch ansi2html scheme. TODO: better color codes
 import ansi2html
+
 scheme = 'solarized'
 ansi2html.style.SCHEME[scheme] = list(ansi2html.style.SCHEME[scheme])
 ansi2html.style.SCHEME[scheme][0] = '#555555'
@@ -201,6 +204,7 @@ async def websocket_handler(request):
     print("INFO: Websocket connection from {} closed".format(request.remote))
     return ws
 
+
 ###############################################################################
 # app factory and entrypoint.
 ###############################################################################
@@ -210,10 +214,10 @@ def create_app(*,
                default_port: int = 22,
                ssl_certfile: Optional[str] = None,
                ssl_keyfile: Optional[str] = None,
-               exec_cmd: Optional[str] = None,
+               exec_cmds: Optional[List[str]] = None,
                verbose=True):
-    if not exec_cmd:
-        exec_cmd = DEFAULT_GPUSTAT_COMMAND
+    if not exec_cmds:
+        exec_cmds = [DEFAULT_GPUSTAT_COMMAND] * len(hosts)
 
     app = web.Application()
     app.router.add_get('/', handler)
@@ -221,16 +225,18 @@ def create_app(*,
 
     async def start_background_tasks(app):
         clients = spawn_clients(
-            hosts, exec_cmd, default_port=default_port, verbose=verbose)
+            hosts, exec_cmds, default_port=default_port, verbose=verbose)
         # See #19 for why we need to this against aiohttp 3.5, 3.8, and 4.0
         loop = app.loop if hasattr(app, 'loop') else asyncio.get_event_loop()
         app['tasks'] = loop.create_task(clients)
         await asyncio.sleep(0.1)
+
     app.on_startup.append(start_background_tasks)
 
     async def shutdown_background_tasks(app):
         cprint(f"... Terminating the application", color='yellow')
         app['tasks'].cancel()
+
     app.on_shutdown.append(shutdown_background_tasks)
 
     # jinja2 setup
@@ -248,15 +254,13 @@ def create_app(*,
 
         cprint(f"Using Secure HTTPS (SSL/TLS) server ...", color='green')
     else:
-        ssl_context = None   # type: ignore
+        ssl_context = None  # type: ignore
     return app, ssl_context
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('hosts', nargs='*',
-                        help='List of nodes. Syntax: HOSTNAME[:PORT]')
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--port', type=int, default=48109,
                         help="Port number the web application will listen to. (Default: 48109)")
@@ -268,14 +272,19 @@ def main():
                         help="Path to the SSL certificate file (Optional, if want to run HTTPS server)")
     parser.add_argument('--ssl-keyfile', type=str, default=None,
                         help="Path to the SSL private key file (Optional, if want to run HTTPS server)")
-    parser.add_argument('--exec', type=str,
-                        default=DEFAULT_GPUSTAT_COMMAND,
-                        help="command-line to execute (e.g. gpustat --color --gpuname-width 25)")
+    parser.add_argument("--config_path", required=True, help="Config path")
     args = parser.parse_args()
 
-    hosts = args.hosts or ['localhost']
-    cprint(f"Hosts : {hosts}", color='green')
-    cprint(f"Cmd   : {args.exec}", color='yellow')
+    with open(args.config_path, "r") as file:
+        config = json.load(file)
+
+    hosts = list([])
+    execs = list([])
+    for host, _exec in config:
+        cprint(f"Hosts : {host}", color='green')
+        cprint(f"Cmd   : {_exec}", color='yellow')
+        hosts.append(host)
+        execs.append(_exec)
 
     if args.interval > 0.1:
         context.interval = args.interval
@@ -283,11 +292,12 @@ def main():
     app, ssl_context = create_app(
         hosts=hosts, default_port=args.ssh_port,
         ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile,
-        exec_cmd=args.exec,
+        exec_cmds=execs,
         verbose=args.verbose)
 
     web.run_app(app, host='0.0.0.0', port=args.port,
                 ssl_context=ssl_context)
+
 
 if __name__ == '__main__':
     main()
